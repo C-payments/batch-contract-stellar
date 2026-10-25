@@ -1,0 +1,5 @@
+target/
+.stellar/
+.idea/
+.env
+*.secret
