@@ -20,6 +20,7 @@ pub fn batch_transfer(env: Env, token: Address, from: Address, payments: Vec<Pay
 
 The contract is in [`contracts/batch-payment/src/lib.rs`](contracts/batch-payment/src/lib.rs),
 tests are in [`contracts/batch-payment/src/test.rs`](contracts/batch-payment/src/test.rs).
+Architecture, call flow and testnet deployment details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ### Out of scope for this spike
 
