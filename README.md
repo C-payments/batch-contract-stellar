@@ -1,152 +1,206 @@
-# Soroban Batch Payment — minimal testnet prototype
+# Soroban Multisend
 
-> **Status: minimal testnet spike.** This is a technical proof of concept for a
-> grant application, not production code. It is deployed only to Stellar
-> **testnet** and has not been audited.
+> **Status: Multisend v1 on Stellar testnet.** Not audited; the audit is
+> requested through the Soroban Audit Bank. Not deployed to mainnet.
 
-A single Soroban smart contract function that pays a list of recipients in one
-transaction:
+One Soroban contract call pays a list of recipients in one atomic transaction.
+It is the on-chain primitive for C-Payroll payouts on Stellar; the full design
+is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (section 4), and the
+integration guide is [`docs/INTEGRATION.md`](docs/INTEGRATION.md).
+
+The earlier minimal spike (`batch_transfer`, CP-968) is tagged
+[`v0.1.0-spike`](https://github.com/C-payments/batch-contract-stellar/tree/v0.1.0-spike); its testnet results are in
+Appendix A of the architecture document.
+
+## Interface
 
 ```rust
-pub fn batch_transfer(env: Env, token: Address, from: Address, payments: Vec<Payment>)
-// Payment { to: Address, amount: i128 }
+pub struct Payment { pub to: Address, pub amount: i128, pub reference: BytesN<32> }
+
+pub fn __constructor(env: Env, admin: Address, max_batch_size: u32)
+pub fn multisend(env: Env, token: Address, from: Address, batch_id: BytesN<32>, payments: Vec<Payment>)
+pub fn pause(env: Env)                         // admin
+pub fn unpause(env: Env)                       // admin
+pub fn set_max_batch_size(env: Env, max: u32)  // admin
+pub fn admin(env: Env) -> Address              // read-only
+pub fn is_paused(env: Env) -> bool             // read-only
+pub fn max_batch_size(env: Env) -> u32         // read-only
 ```
 
-1. `from.require_auth()` — the payer must authorize the call (standard Soroban
-   auth). Nobody can use someone else's address as the payer.
-2. For every `{ to, amount }` pair, `token.transfer(from, to, amount)` is called
-   on the given token contract (any SEP-41 token / Stellar Asset Contract).
-3. The call is atomic: if any transfer fails, the whole transaction is reverted.
+`multisend`:
 
-The contract is in [`contracts/batch-payment/src/lib.rs`](contracts/batch-payment/src/lib.rs),
-tests are in [`contracts/batch-payment/src/test.rs`](contracts/batch-payment/src/test.rs).
-Architecture, call flow and testnet deployment details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+1. `from.require_auth()`. The payer's signature covers the nested token
+   transfers, so there is no `approve` step and no standing allowance.
+2. Rejects the call if the contract is paused.
+3. Validates the whole batch before the first transfer: not empty, not above
+   `max_batch_size`, every `amount > 0`, the total does not overflow.
+4. Records `(from, batch_id)` in persistent storage and rejects a repeat.
+   Keying by payer means nobody can block a payer's batch id.
+5. Calls `token.transfer(from, to, amount)` for each payment and publishes
+   `transfer_executed`, then `batch_executed`.
 
-### Out of scope for this spike
+Any failure reverts the whole call: nobody is paid and `batch_id` stays unused.
+The contract never holds funds and charges no fee. It is not upgradable.
 
-These are planned for the next grant milestone and are intentionally **not**
-implemented here: allowance-based flow, custom events with payment references,
-batch size limit, contract pause, user interface. Mainnet deployment and
-integration with C-Payroll payment flows are also out of scope.
+| Error | Code | Meaning |
+|---|---:|---|
+| `InvalidBatchSize` | 1 | Empty batch, batch above the limit, or a zero limit |
+| `InvalidAmount` | 2 | Amount not above zero |
+| `Overflow` | 3 | Batch total overflowed |
+| `DuplicateBatchId` | 4 | This payer already executed this batch id |
+| `Paused` | 5 | `multisend` is paused |
 
-## Testnet demo result
+| Event | Topics | Data |
+|---|---|---|
+| `transfer_executed` | `token`, `from`, `to` | `batch_id`, `amount`, `reference` |
+| `batch_executed` | `token`, `from` | `batch_id`, `count`, `total` |
+| `paused`, `unpaused` | `admin` | — |
+| `max_batch_size_set` | `admin` | `max_batch_size` |
+
+## Admin: 2-of-3 multisig
+
+The admin is a Stellar account with three signers of weight 1, master key
+weight 0 and low, medium and high thresholds of 2. Soroban checks an account's
+medium threshold; the admin is the transaction source, so the transaction
+signatures carry the authorization. The admin address cannot be changed, so
+signers are rotated on the account; a high threshold of 2 lets two signers
+replace a lost third.
+
+[`scripts/admin-call.sh`](scripts/admin-call.sh) builds an admin call with the
+admin account as source, simulates it, collects the signatures and submits it:
+
+```sh
+scripts/admin-call.sh multisend ms-admin ms-signer-1 ms-signer-2 -- pause
+scripts/admin-call.sh multisend ms-admin ms-signer-2 ms-signer-3 -- unpause
+scripts/admin-call.sh multisend ms-admin ms-signer-1 ms-signer-3 -- set_max_batch_size --max 25
+```
+
+A signer can be `ledger` to sign with a connected Ledger device. That path has
+not been tried with a device yet.
+
+## Build and test
+
+```sh
+cargo test               # 28 unit tests
+stellar contract build   # -> target/wasm32v1-none/release/multisend.wasm
+cargo llvm-cov --ignore-filename-regex 'test\.rs' --fail-under-lines 90   # coverage gate, as in CI
+```
+
+The Rust toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml).
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the tests with
+the coverage gate, builds the contract and prints the wasm hash on every push;
+a `v*` tag publishes a release with the wasm and its hash
+([`release.yml`](.github/workflows/release.yml)). Line coverage of
+`src/lib.rs` is 98.1%; the uncovered lines are code generated by
+`#[contracttype]`.
+
+The tests ([`contracts/multisend/src/test.rs`](contracts/multisend/src/test.rs))
+cover payouts and balances, events, payer and admin authorization, every
+validation error, replay protection (including the same id from another payer),
+atomicity (a failed transfer pays nobody and leaves the batch id unused), TTL
+extension, pause, and changing the batch limit.
+
+## Testnet deployment
+
+Network: Stellar testnet, protocol 30. Token: Circle testnet USDC
+`USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5`, Stellar Asset
+Contract [`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA).
 
 | | |
 |---|---|
-| Network | Stellar testnet (`Test SDF Network ; September 2015`), protocol 29 |
-| Token | Circle testnet USDC `USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5` ([Circle docs](https://developers.circle.com/stablecoins/usdc-contract-addresses)) |
-| Token contract (SAC) | [`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://stellar.expert/explorer/testnet/contract/CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA) |
-| **Batch contract ID** | [`CAFZNGNPQCPO2GYUWXJRNX3P3EB6H72JVJEFCXSGZTG264APPESIJNSV`](https://stellar.expert/explorer/testnet/contract/CAFZNGNPQCPO2GYUWXJRNX3P3EB6H72JVJEFCXSGZTG264APPESIJNSV) |
-| Wasm hash | `1937f798371fff8badc6f88701c0cfc242f337e69ade68296a671fb51c0d32c1` |
-| Wasm upload tx | [`891c9ebb135a458c35b5fb24696760bf52bd87079614d52447939edf78ab676e`](https://stellar.expert/explorer/testnet/tx/891c9ebb135a458c35b5fb24696760bf52bd87079614d52447939edf78ab676e) (ledger 5379430) |
-| **Contract deploy tx** | [`0a0400024ae0e53896bcb0879c371f9b51329270e6e5fa80365dc62ad4644a70`](https://stellar.expert/explorer/testnet/tx/0a0400024ae0e53896bcb0879c371f9b51329270e6e5fa80365dc62ad4644a70) (ledger 5379431) |
-| **Batch transfer tx** | [`954492f3cb3a14a0e368fe7c87a4a6b2b918d3fca0c837f6a7b7a98d1a7aa5eb`](https://stellar.expert/explorer/testnet/tx/954492f3cb3a14a0e368fe7c87a4a6b2b918d3fca0c837f6a7b7a98d1a7aa5eb) (ledger 5379435, 2026-10-25 09:32:42 UTC) |
+| **Multisend contract** | [`CA4ZE5DVT7MBG3P6TOSK3SJJNJAKFMGW2A5XSQCSOEM5XBIT5ZTTL3AD`](https://stellar.expert/explorer/testnet/contract/CA4ZE5DVT7MBG3P6TOSK3SJJNJAKFMGW2A5XSQCSOEM5XBIT5ZTTL3AD) |
+| Wasm hash | `e8135240f372a500f60cc47fa764c94de2587af656773dfce18188979e8b0c62` (identical to the local build from this commit) |
+| Admin account | [`GD7CQVI3M6CZEXJPXGVWGMZJ6EP2R5IZ5DNFCXAAD7RQBY2EHTMNAQHB`](https://stellar.expert/explorer/testnet/account/GD7CQVI3M6CZEXJPXGVWGMZJ6EP2R5IZ5DNFCXAAD7RQBY2EHTMNAQHB): thresholds 2/2/2, master weight 0 |
+| Admin signers | `GBOGKFAH2WJZQPQAV22BHP2FWMDIXFPFFPKPSRWAPZDJVR5UB3UL4NJC`, `GCNS3E6N5U43F7FSTMMJ2FWHNC4AGGLGMBOZLG2O26PI3HYS4FPCLB45`, `GDWYXFTXMTT3BD7YAJ76EFXHEE23RPORDVYW63HKQ2XJYLECFRORSCZ6` (weight 1 each) |
 | Payer | [`GA6PNWNR3SB3SE36PIQUCGEJJFYBEYOZRTT2U6DSCWTTFOPZBV44IOVQ`](https://stellar.expert/explorer/testnet/account/GA6PNWNR3SB3SE36PIQUCGEJJFYBEYOZRTT2U6DSCWTTFOPZBV44IOVQ) |
+| `max_batch_size` | 25 |
 
-Raw transaction data is also available from Horizon, e.g.
-`https://horizon-testnet.stellar.org/transactions/954492f3cb3a14a0e368fe7c87a4a6b2b918d3fca0c837f6a7b7a98d1a7aa5eb`.
+| Step | Result | Transaction |
+|---|---|---|
+| Add signer 1, signer 2 | ✅ | [`b9bf08f9…`](https://stellar.expert/explorer/testnet/tx/b9bf08f9095a06131ac5c93b34c2636a13742989d6ee29d0c750b9f699700f17), [`92a3ebaf…`](https://stellar.expert/explorer/testnet/tx/92a3ebaf26590b74fe763738ba2479ac391c4a97c608a9e54f8b4d36b4273f28) |
+| Add signer 3, master weight 0, thresholds 2/2/2 | ✅ | [`9a9c15dd…`](https://stellar.expert/explorer/testnet/tx/9a9c15dd5248686dc005f6a70265e04aa35043cb512eb95eca0caba05a026fd9) |
+| Upload wasm | ✅ | [`3174ea75…`](https://stellar.expert/explorer/testnet/tx/3174ea753b3fb4b22db2599a3aea93c313d3af2a5f0e4bf96e1d21dc366b3ff2) |
+| Deploy with admin and limit 10 | ✅ | [`7d11ceb7…`](https://stellar.expert/explorer/testnet/tx/7d11ceb7e10591b062581af969b50225c1c2225f73d67527abc59fc0d9616f21) |
+| `multisend`: 4 recipients, 9.25 USDC | ✅ 4 `transfer_executed`, `batch_executed` count 4, total 92500000 | [`0b13fc22…`](https://stellar.expert/explorer/testnet/tx/0b13fc2286c428943e7578c5f2614ff0aef6aedb5ae42be88c878e953fb511d9) |
+| Same `batch_id` again | ❌ `Error(Contract, #4)` `DuplicateBatchId` in simulation | — |
+| `pause` signed by signer 1 only | ❌ `tx_bad_auth`, not included | — |
+| `pause` signed by signers 1 and 2 | ✅ | [`be941154…`](https://stellar.expert/explorer/testnet/tx/be9411547d882931f388fc9f402713bbe3fa57b29d75503c9da93528405ef80e) |
+| `multisend` while paused | ❌ `Error(Contract, #5)` `Paused` in simulation | — |
+| `unpause` signed by signers 2 and 3 | ✅ | [`6f1773d4…`](https://stellar.expert/explorer/testnet/tx/6f1773d4937f1c6eb38fac7180d9257fb50049052ae1ebb34aaaf334b88286d7) |
+| `pause` signed by the master key only | ❌ `tx_bad_auth`, not included | — |
+| `set_max_batch_size 200` (signers 1, 3), to measure the limit | ✅ | [`d33e3112…`](https://stellar.expert/explorer/testnet/tx/d33e3112a72ef649100ce579ccf97cd7f4105f809cc2136dfcb0a59daf5c039b) |
+| `multisend`: 25 payments | ✅ | [`3b079f3b…`](https://stellar.expert/explorer/testnet/tx/3b079f3be658b5aca98bdb0993ed230dd173719039999e1d62df9351b28b093f) |
+| `multisend`: 26 payments | ❌ `total events size exceeds network config maximum` (16408 > 16384) | [`358d0414…`](https://stellar.expert/explorer/testnet/tx/358d04148ae2d56c43e5c4db1a1474859babee167c067dd6c1f97329e0f7f902) |
+| `set_max_batch_size 25` (signers 1, 2) | ✅ | [`fa1bcb85…`](https://stellar.expert/explorer/testnet/tx/fa1bcb855d9dab3f101625935fa5ad33defea24e8121d883c45b2e94edf3271e) |
 
-### Batch transfer: recipients and amounts
+### Batch limit
 
-One `batch_transfer` call, 4 recipients, 9.25 USDC in total:
+Each USDC payment emits 620 bytes of events (248 for the token's `transfer`,
+372 for `transfer_executed`), and `batch_executed` adds about 290 bytes.
+Testnet allows 16,384 bytes of contract events per transaction, so 25 payments
+fit and 26 do not. Simulation does not check this limit: a 200-payment batch
+simulates successfully. The limit was therefore measured with real submissions
+([`scripts/measure-batch-limit.sh`](scripts/measure-batch-limit.sh) with
+`SEND=1`).
 
-| # | Recipient | Amount (USDC) | Amount (stroops) | Balance after tx |
-|---|---|---:|---:|---:|
-| 1 | [`GBQCZFYO4ZKMGJUE5GJGINKFDMDGOYDRKQRKFCP6BJFUB3SN7ZVR7E2P`](https://stellar.expert/explorer/testnet/account/GBQCZFYO4ZKMGJUE5GJGINKFDMDGOYDRKQRKFCP6BJFUB3SN7ZVR7E2P) | 1.0000000 | 10000000 | 1.0000000 |
-| 2 | [`GDXW3WHJ2ZES66RULD2E27CVXU4HCP4L5D5OLQSICNGFHPUBWZTEAGYF`](https://stellar.expert/explorer/testnet/account/GDXW3WHJ2ZES66RULD2E27CVXU4HCP4L5D5OLQSICNGFHPUBWZTEAGYF) | 2.5000000 | 25000000 | 2.5000000 |
-| 3 | [`GA5ZGO3HI5XKWT2VK7JJHL5WTJ5VNLMLHP6PK3VHPVEIXE4LBMIMIJXB`](https://stellar.expert/explorer/testnet/account/GA5ZGO3HI5XKWT2VK7JJHL5WTJ5VNLMLHP6PK3VHPVEIXE4LBMIMIJXB) | 0.7500000 | 7500000 | 0.7500000 |
-| 4 | [`GCLZPK3MK6FJY2VOMYAH3C6UFGC37EJW3VXBBSSEU675AMO43B43IF3R`](https://stellar.expert/explorer/testnet/account/GCLZPK3MK6FJY2VOMYAH3C6UFGC37EJW3VXBBSSEU675AMO43B43IF3R) | 5.0000000 | 50000000 | 5.0000000 |
+Applied transactions also used up to 125 more instructions than simulated
+(25- and 40-payment batches failed with `operation instructions exceeds amount
+specified`), and stellar-cli 28.1.0 ignored `--instruction-leeway` on the
+protocol 30 testnet. Batches near the limit were sent with an explicit
+`--instructions` budget about 10% above the simulated value.
 
-**Result:** transaction status `SUCCESS` (Soroban RPC `getTransaction`) /
-`successful: true` (Horizon). The USDC contract emitted four `transfer` events
-`payer → recipient` with exactly the amounts above. The payer's USDC balance
-went from 50.0000000 to 40.7500000 (−9.25). Recipients held 0 USDC before the
-call.
+## Reproduce on testnet
 
-> Stellar testnet is periodically reset by SDF. If the links above no longer
-> resolve, the demo can be reproduced with the steps below.
+Keys are generated locally by stellar-cli in `~/.config/stellar`; they are not
+part of this repository. The payer and recipients need USDC trustlines and the
+payer needs testnet USDC (https://faucet.circle.com or the testnet DEX); see
+the [spike README](https://github.com/C-payments/batch-contract-stellar/tree/v0.1.0-spike#reproduce-on-testnet-with-stellar-cli)
+for those steps.
+
+```sh
+USDC=USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+TOKEN=$(stellar contract id asset --asset $USDC --network testnet)
+
+# 1. Admin account: three signers of weight 1, master weight 0, thresholds 2
+stellar keys generate ms-admin --network testnet --fund
+for i in 1 2 3; do stellar keys generate ms-signer-$i; done
+for i in 1 2; do
+  stellar tx new set-options --source-account ms-admin --network testnet \
+    --signer $(stellar keys address ms-signer-$i) --signer-weight 1
+done
+stellar tx new set-options --source-account ms-admin --network testnet \
+  --signer $(stellar keys address ms-signer-3) --signer-weight 1 \
+  --master-weight 0 --low-threshold 2 --med-threshold 2 --high-threshold 2
+
+# 2. Build, upload and deploy with the admin and a batch limit
+stellar contract build
+WASM_HASH=$(stellar contract upload --wasm target/wasm32v1-none/release/multisend.wasm \
+  --source-account payer --network testnet)
+stellar contract deploy --wasm-hash $WASM_HASH --source-account payer --network testnet \
+  --alias multisend -- --admin $(stellar keys address ms-admin) --max_batch_size 25
+
+# 3. Multisend (amounts in base units, 1 USDC = 10_000_000; ids are 32 bytes hex)
+stellar contract invoke --id multisend --source-account payer --network testnet \
+  -- multisend --token $TOKEN --from $(stellar keys address payer) \
+  --batch_id $(openssl rand -hex 32) \
+  --payments "[
+    {\"to\":\"$(stellar keys address r1)\",\"amount\":\"10000000\",\"reference\":\"$(printf '%064x' 1)\"},
+    {\"to\":\"$(stellar keys address r2)\",\"amount\":\"25000000\",\"reference\":\"$(printf '%064x' 2)\"}
+  ]"
+
+# 4. Admin calls need two signers
+scripts/admin-call.sh multisend ms-admin ms-signer-1 ms-signer-2 -- pause
+scripts/admin-call.sh multisend ms-admin ms-signer-2 ms-signer-3 -- unpause
+```
 
 ## Tool versions
 
 | Tool | Version |
 |---|---|
-| Rust / cargo | 1.93.1 |
-| Rust target | `wasm32v1-none` |
+| Rust | 1.93.1 (pinned in `rust-toolchain.toml`), target `wasm32v1-none` |
 | soroban-sdk | 29.0.1 |
-| stellar-cli | 28.1.0 |
-| Testnet protocol | 29 |
+| stellar-cli | 28.1.0 (testnet runs at protocol 30; the CLI warns that it supports protocol 28) |
 
-## Build and test
+## License
 
-```sh
-rustup target add wasm32v1-none
-cargo test                 # runs the two unit tests
-stellar contract build     # -> target/wasm32v1-none/release/batch_payment.wasm
-```
-
-The two tests (`contracts/batch-payment/src/test.rs`) use a local Stellar Asset
-Contract:
-
-- `batch_transfer_pays_every_recipient_when_payer_authorizes` — with payer
-  authorization each recipient receives its amount, the payer's balance drops by
-  the total, and the only authorization requested is the payer's for
-  `batch_transfer`.
-- `batch_transfer_is_rejected_without_payer_authorization` — without payer
-  authorization the call fails (`Error(Auth, InvalidAction)` inside the host)
-  and no balances change.
-
-## Reproduce on testnet with stellar-cli
-
-Keys are generated locally by stellar-cli and stored in `~/.config/stellar`;
-they are not part of this repository.
-
-```sh
-USDC=USDC:GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
-
-# 1. Accounts: a payer and 4 recipients, funded with testnet XLM by friendbot
-for n in payer r1 r2 r3 r4; do stellar keys generate $n --network testnet --fund; done
-
-# 2. USDC trustlines (a classic asset needs one before it can be received)
-for n in payer r1 r2 r3 r4; do
-  stellar tx new change-trust --source-account $n --line $USDC --network testnet
-done
-
-# 3. Get testnet USDC for the payer: either from https://faucet.circle.com
-#    (Stellar testnet) or by buying it for XLM on the testnet DEX
-#    (in the demo, 50 USDC were bought this way in tx
-#    f6ef4f626359f3abce3c1dd50147c3fae96d0c6a48774d0c2764f1c81732295f)
-stellar tx new path-payment-strict-receive --source-account payer \
-  --send-asset native --send-max 700000000 \
-  --destination payer --dest-asset $USDC --dest-amount 500000000 \
-  --network testnet
-
-# 4. Build and deploy the contract
-stellar contract build
-stellar contract upload --wasm target/wasm32v1-none/release/batch_payment.wasm \
-  --source-account payer --network testnet          # prints the wasm hash
-stellar contract deploy --wasm-hash <WASM_HASH> \
-  --source-account payer --network testnet --alias batch-payment
-
-# 5. Batch transfer (amounts are in stroops, 1 USDC = 10_000_000)
-TOKEN=$(stellar contract id asset --asset $USDC --network testnet)
-stellar contract invoke --id batch-payment --source-account payer --network testnet \
-  -- batch_transfer \
-  --token $TOKEN \
-  --from $(stellar keys address payer) \
-  --payments "[
-    {\"to\":\"$(stellar keys address r1)\",\"amount\":\"10000000\"},
-    {\"to\":\"$(stellar keys address r2)\",\"amount\":\"25000000\"},
-    {\"to\":\"$(stellar keys address r3)\",\"amount\":\"7500000\"},
-    {\"to\":\"$(stellar keys address r4)\",\"amount\":\"50000000\"}
-  ]"
-
-# 6. Check balances
-for n in payer r1 r2 r3 r4; do
-  stellar contract invoke --id $TOKEN --source-account payer --network testnet --send=no \
-    -- balance --id $n
-done
-```
-
-The payer signs the transaction as its source account, which also satisfies
-`from.require_auth()` and the nested `transfer` authorizations of the token
-contract.
+[Apache-2.0](LICENSE).

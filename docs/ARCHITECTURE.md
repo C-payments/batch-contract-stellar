@@ -67,23 +67,27 @@ pub fn batch_transfer(env: Env, token: Address, from: Address, payments: Vec<Pay
 ```rust
 pub struct Payment { pub to: Address, pub amount: i128, pub reference: BytesN<32> }
 
+pub fn __constructor(env: Env, admin: Address, max_batch_size: u32)
 pub fn multisend(env: Env, token: Address, from: Address, batch_id: BytesN<32>, payments: Vec<Payment>)
 pub fn pause(env: Env)                         // admin
 pub fn unpause(env: Env)                       // admin
 pub fn set_max_batch_size(env: Env, max: u32)  // admin
+pub fn admin(env: Env) -> Address              // read-only
+pub fn is_paused(env: Env) -> bool             // read-only
+pub fn max_batch_size(env: Env) -> u32         // read-only
 ```
 
 | Topic | Rule |
 |---|---|
 | Authorization | `from.require_auth()`. The payer's signature covers the nested token transfers, so there is no `approve` step and no standing allowance (decision in 5.1) |
 | Custody | The contract never holds balances: funds move directly from payer to recipients |
-| Validation | Non-empty; length not above `max_batch_size`; each `amount > 0`; checked sum |
-| Replay protection | Each `batch_id` is stored once in persistent storage, as in the EVM `DuplicateBatchId` check. TTL is extended on write. C-Payroll also refuses to resubmit an executed `batch_id` from its own records, so an expired storage entry cannot cause a double payout |
-| Events | `transfer_executed(batch_id, token, from, to, amount, reference)` per payment; `batch_executed(batch_id, from, count, total)` per batch |
-| Batch limit | `max_batch_size` is set at deployment from simulation of the deployed contract and can be lowered or raised by the admin. C-Payroll simulates every batch before signing and splits a payroll run above the limit into several Multisend transactions |
+| Validation | Non-empty; length not above `max_batch_size`; each `amount > 0`; checked sum. The whole batch is validated before the first transfer |
+| Replay protection | Each `(from, batch_id)` pair is stored once in persistent storage, as in the EVM `DuplicateBatchId` check. Keying by payer means nobody can block a company's batch by submitting their own batch with the same id first. The entry's TTL is extended to 30 days on write, and the contract instance TTL to 30 days on every state-changing call. A failed batch leaves its `batch_id` unused. C-Payroll also refuses to resubmit an executed `batch_id` from its own records, so an expired storage entry cannot cause a double payout |
+| Events | `transfer_executed(batch_id, token, from, to, amount, reference)` per payment, with `token`, `from` and `to` as topics; `batch_executed(batch_id, token, from, count, total)` per batch, with `token` and `from` as topics; `paused`, `unpaused` and `max_batch_size_set(max_batch_size)` for admin actions, with `admin` as topic |
+| Batch limit | `max_batch_size` is set at deployment and can be lowered or raised by the admin; zero is rejected. Its value comes from test submissions of the deployed contract, not from simulation alone: simulation does not enforce the per-transaction contract events size, which is the binding limit. Each USDC payment emits about 620 bytes of events (the token's `transfer` and `transfer_executed`), so with testnet's 16,384-byte limit a batch holds 25 payments. The mainnet value is measured the same way at deployment (3.1). C-Payroll simulates every batch before signing, budgets instructions above the simulated value (applied transactions used up to 125 more instructions than simulated on testnet), and splits a payroll run above the limit into several Multisend transactions |
 | Pause | Blocks `multisend` only; no funds are held, so pausing never locks funds |
-| Admin | 2-of-3 multisig account. Admin powers are limited to pause, unpause and the batch limit: the admin cannot move funds or change recipients |
-| Upgrade | The contract is not upgradable. Fixes ship as a new deployment, and the new contract ID is registered as a footprint update |
+| Admin | 2-of-3 multisig account: three signers of weight 1, master key weight 0, low, medium and high thresholds of 2. Soroban checks an account's medium threshold; the admin is the transaction source, so the transaction signatures carry the authorization. Admin powers are limited to pause, unpause and the batch limit: the admin cannot move funds or change recipients. The admin address is set in the constructor and cannot change, so signers are rotated on the account itself; a high threshold of 2 lets two signers replace a lost third |
+| Upgrade | The contract is not upgradable: it has no function that replaces its wasm. Fixes ship as a new deployment, and the new contract ID is registered as a footprint update |
 | Fee | None. The Stellar version charges no contract fee |
 
 | Error | Meaning |
@@ -101,7 +105,7 @@ pub fn set_max_batch_size(env: Env, max: u32)  // admin
 | Entry | `batchTransfers(transfers, batchId)` | `multisend(token, from, batch_id, payments)` |
 | Tokens in a batch | Mixed, including native | One token per batch |
 | Spend authorization | ERC-20 `approve` | `require_auth` authorization tree, no allowance |
-| Replay | `executedBatches` | `batch_id` in persistent storage |
+| Replay | `executedBatches` | `(from, batch_id)` in persistent storage |
 | Limits | `maxBatchSize` | `max_batch_size` |
 | Pause | Yes | Yes |
 | Fee | Native fee, capped | None |
@@ -111,7 +115,7 @@ pub fn set_max_batch_size(env: Env, max: u32)  // admin
 
 ### 5.1 Direct authorization rather than allowance
 
-Alternative considered: SEP-41 `approve` plus `transfer_from`. Direct authorization needs one signature and one transaction, leaves no standing allowance that could be abused later, and is already proven on testnet by the spike. Trade-off: the authorization tree grows with each recipient and counts toward transaction size, so it lowers the maximum batch size. This is handled by the simulated batch limit and automatic splitting (4.2).
+Alternative considered: SEP-41 `approve` plus `transfer_from`. Direct authorization needs one signature and one transaction, leaves no standing allowance that could be abused later, and is already proven on testnet by the spike. Trade-off: the authorization tree grows with each recipient and counts toward transaction size, so it lowers the maximum batch size. On testnet the per-transaction events size binds first (4.2). Both are handled by the measured batch limit and automatic splitting.
 
 Wallet constraint: `from` is the transaction source account, so the transaction signature carries the authorization. This works with wallets that implement only `stellar_signXDR` and `stellar_signAndSubmitXDR`, including JAM over WalletConnect, and needs no `stellar_signAuthEntry`. Signing Multisend from JAM is tested as part of deliverable 2.4.
 
@@ -205,13 +209,13 @@ The agent reads balances and prepares a batch as a draft. It has no signing abil
 | Multisend | Company wallet | Company | Company's own wallet |
 | Sponsored onboarding | Sponsor and worker | Sponsor | Sponsor key in HashiCorp Vault, used only by the JAM sponsor service; worker key on the worker's device |
 | Swap, CCTP, payment in JAM | Worker | JAM sponsor through a fee-bump transaction, so the worker needs no XLM | Worker's device: Secure Enclave or Android Keystore, biometric gate, no key export |
-| Contract admin | 2-of-3 multisig | Admin | Three signers from the C-Payroll leadership on separate hardware wallets |
+| Contract admin | 2-of-3 multisig (thresholds 2, master key weight 0) | Admin | Three signers from the C-Payroll leadership on separate hardware wallets |
 
 C-Payroll holds no customer keys or funds. Authorization inside C-Payroll (who may approve a payroll) stays off-chain in its existing role model with multi-step approvals.
 
 ## 8. Data and reconciliation
 
-Source of truth: contract events read through RPC `getEvents` with a stored cursor. RPC keeps events for a limited window, so ingestion runs continuously and stores every event in C-Payroll's database; a missed range is recovered from transaction results by hash. Events are matched to payment records on `batch_id` and `reference`, idempotently by transaction hash and event index. A mismatch raises an alert (section 11). Activity is exported as CSV.
+Source of truth: contract events read through RPC `getEvents` with a stored cursor. RPC keeps events for a limited window, so ingestion runs continuously and stores every event in C-Payroll's database; a missed range is recovered from transaction results by hash. The contract is open to any caller, so ingestion keeps only events whose `from` is a company wallet linked in C-Payroll and whose `token` is the USDC or XLM Stellar Asset Contract. Events are matched to payment records on `from`, `batch_id` and `reference`, idempotently by transaction hash and event index. A mismatch raises an alert (section 11). Activity is exported as CSV.
 
 ## 9. Infrastructure
 
@@ -220,8 +224,8 @@ Source of truth: contract events read through RPC `getEvents` with a stored curs
 | Environments | Testnet and mainnet, each with its own contract ID and configuration |
 | RPC | SDF testnet RPC for development; on mainnet, two independent RPC providers with automatic fallback |
 | Secrets | Sponsor key and service credentials in HashiCorp Vault, already used by C-Payroll; admin signers on hardware wallets, never on servers |
-| CI | GitHub Actions: `cargo test`, coverage report and `stellar contract build` on every push |
-| Releases | Reproducible builds; the wasm hash is published for each release (spike hash in Appendix A) |
+| CI | GitHub Actions on every push: tests with at least 90% line coverage enforced (`cargo llvm-cov --fail-under-lines 90`), `stellar contract build` and the wasm hash |
+| Releases | Reproducible builds: Rust pinned in `rust-toolchain.toml`, stellar-cli pinned in CI. A version tag publishes a GitHub release with the wasm and its hash (spike hash in Appendix A) |
 
 ## 10. Security
 
@@ -251,7 +255,7 @@ The final plan is deliverable 2.7; monitors go live in 3.4.
 
 | Monitor | Trigger | Response |
 |---|---|---|
-| Unexpected recipient | Event not in an approved batch | Critical: pause contract, investigate |
+| Unexpected recipient | Event from a linked company wallet that is not in an approved batch | Critical: pause contract, investigate |
 | Reconciliation drift | Event total differs from batch total | High |
 | Admin action | `pause`, `unpause` or limit change not in the change log | High |
 | Event gap | No ingestion while batches are pending | High |
@@ -261,7 +265,7 @@ The final plan is deliverable 2.7; monitors go live in 3.4.
 | Swap rate | Deviation from the reference rate above 2% | High |
 | CCTP legs | Burn and mint amounts differ beyond tolerance | High |
 
-Populated thresholds are shared privately, as Stellar's monitoring template advises; the structure and method are public.
+Monitors consider only events whose `from` is a company wallet linked in C-Payroll: the contract is permissionless, so calls by other accounts are not incidents. Populated thresholds are shared privately, as Stellar's monitoring template advises; the structure and method are public.
 
 ## 12. Failure modes
 
@@ -269,8 +273,8 @@ Populated thresholds are shared privately, as Stellar's monitoring template advi
 |---|---|---|
 | Missing trustline | Whole batch reverts | Pre-check flags the recipient before signing; remove or onboard |
 | Insufficient balance | Reverts, no funds moved | Fund and resubmit |
-| Resource limit exceeded | Simulation fails before signing | Split automatically into smaller batches |
-| Repeated submit | `DuplicateBatchId` | Treated as already executed |
+| Resource limit exceeded | `max_batch_size` keeps batches under the events size limit, which simulation does not check; a batch above it fails simulation with `InvalidBatchSize` | Split automatically into smaller batches |
+| Repeated submit | `DuplicateBatchId` | Find the original transaction and its events for `(from, batch_id)` before marking the batch executed |
 | RPC outage | Submit or status unknown | Fallback RPC; query by hash before any retry |
 | Expired transaction | Not applied | Rebuild and re-sign |
 | CCTP mint fails | Burn done, mint pending | Retry mint with the attestation; show pending |
@@ -306,7 +310,7 @@ Contract: unit and integration tests covering limits, replay, pause, reverts and
 
 | Element | Commitment |
 |---|---|
-| Metric | Cumulative USDC volume disbursed through the registered Multisend contract on mainnet |
+| Metric | Cumulative USDC volume disbursed through the registered Multisend contract on mainnet, counted from `transfer_executed` events whose `token` is the USDC Stellar Asset Contract |
 | Threshold | $100,000 |
 | Window | 60 consecutive days from the Multisend mainnet deployment, ending no later than week 18 |
 | Footprint | Multisend mainnet contract ID; JAM sponsor account(s); the USDC asset |
@@ -333,7 +337,7 @@ Network: Stellar testnet. Tools: Rust 1.93.1, soroban-sdk 29.0.1, stellar-cli 28
 | Batch tx | `954492f3cb3a14a0e368fe7c87a4a6b2b918d3fca0c837f6a7b7a98d1a7aa5eb` |
 | Result | 4 recipients, 9.25 USDC, successful; fee charged 19,557 stroops (0.0019557 XLM) |
 
-The production batch limit is set in T1 from simulation of the Multisend v1 contract (section 4.2). Because C-Payroll splits larger runs automatically, the limit affects how many transactions a payroll run needs, not whether it can run.
+The production batch limit is set from test submissions of the deployed Multisend v1 contract (section 4.2). Because C-Payroll splits larger runs automatically, the limit affects how many transactions a payroll run needs, not whether it can run.
 
 ## Appendix B. References
 
