@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  STELLAR_CLI_VERSION: 28.1.0
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target wasm32v1-none
+
+      - name: Install stellar-cli
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" stellar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build contract
+        run: |
+          cargo test
+          stellar contract build
+          cp target/wasm32v1-none/release/multisend.wasm .
+          sha256sum multisend.wasm | tee multisend.wasm.sha256
+
+      - name: Publish release with the wasm and its hash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" multisend.wasm multisend.wasm.sha256 \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Wasm sha256: \`$(cut -d' ' -f1 multisend.wasm.sha256)\`. Built with Rust $(rustc --version | cut -d' ' -f2) and stellar-cli ${STELLAR_CLI_VERSION}."
