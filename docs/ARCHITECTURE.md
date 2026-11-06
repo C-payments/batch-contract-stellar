@@ -2,7 +2,7 @@
 
 Version 2, November 2026. This document is the technical architecture for our SCF #46 Integration Track submission ($95,000, 13 weeks of engineering, tranches 10/20/30/40, final-tranche metric of $100,000 USDC over 60 days).
 
-Status labels used below: **Existing** = in production or in code today. **Spike** = running on Stellar testnet today. **T1 / T2 / T3** = built in this award.
+Status labels used below: **Existing** = in production or in code today. **Testnet** = built at our own cost before this submission and running on Stellar testnet today. **T1 / T2 / T3** = built in this award.
 
 ## 1. Overview and scope
 
@@ -39,21 +39,22 @@ flowchart LR
 | Component | Status | Language | Location | Owner |
 |---|---|---|---|---|
 | EVM `BatchExecutor` (pattern source) | Existing | Solidity | private repository | Yaroslav |
-| `BatchPayment` spike | Spike | Rust, soroban-sdk 29.0.1 | public `batch-contract-stellar` | Yaroslav |
-| Multisend v1 (evolves the spike) | T1 | Rust | public `batch-contract-stellar` | Yaroslav |
+| `BatchPayment` spike | Testnet, tagged `v0.1.0-spike` | Rust, soroban-sdk 29.0.1 | public `batch-contract-stellar` | Yaroslav |
+| Multisend v1: contract, 28 tests, CI with 90% coverage gate, 2-of-3 multisig admin | Testnet | Rust, soroban-sdk 29.0.1 | public `batch-contract-stellar` | Yaroslav |
+| Multisend v1.1: compact events for a higher batch limit, property and fuzz tests, Audit Bank readiness package | T1 | Rust | public `batch-contract-stellar` | Yaroslav |
 | Bridge integration | Existing; Stellar route configured, verified in T2 (sandbox) and T3 (mainnet) | TypeScript | `payroll-crypto` | Yaroslav |
 | Stellar Wallets Kit connection | T1 | TypeScript | `payroll-frontend` | Yaroslav |
 | Multisend in payout flows, event reconciliation | T2 | TypeScript | `payroll-crypto`, `payroll-main` | Yaroslav |
 | MCP tools for Stellar batch preparation | T2 | TypeScript | `payroll-crypto` | Yaroslav |
 | JAM Stellar accounts, balances, payments, trustlines, history | Existing: wrapper over `Soneso/stellar-ios-mac-sdk` (iOS) and `org.stellar:wallet-sdk` (Android); JAM derives from Unstoppable Wallet (MIT, copyright preserved) | Swift, Kotlin | JAM apps | Paul |
 | JAM WalletConnect/Reown sessions and multi-chain swap engine | Existing for EVM chains | Swift, Kotlin | JAM apps | Paul |
-| JAM sponsored accounts and onboarding trustline | T1 | Swift, Kotlin | JAM apps; Swift module public in T3 | Paul |
+| JAM sponsor service, sponsored accounts, onboarding trustline, fee-bump | T1 | Swift, Kotlin | JAM apps; Swift module public in T3 | Paul |
 | Soroswap, WalletConnect for Stellar, CCTP in JAM | T2 | Swift, Kotlin | JAM apps | Paul |
 | Monitoring worker and reconciliation job | T3 | TypeScript | C-Payroll infrastructure, covering both footprints | Yaroslav, Paul |
 
 ## 4. Soroban Multisend specification
 
-### 4.1 Today (Spike)
+### 4.1 Spike (tagged `v0.1.0-spike`)
 
 ```rust
 pub struct Payment { pub to: Address, pub amount: i128 }
@@ -62,7 +63,9 @@ pub fn batch_transfer(env: Env, token: Address, from: Address, payments: Vec<Pay
 
 `from.require_auth()`, then `token.transfer(from, to, amount)` for each payment. Stateless. Any failed transfer reverts the whole call. Testnet contract `CAFZNGNPQCPO2GYUWXJRNX3P3EB6H72JVJEFCXSGZTG264APPESIJNSV`; results in Appendix A.
 
-### 4.2 Multisend v1 (T1)
+### 4.2 Multisend v1 (Testnet today; v1.1 in T1)
+
+Multisend v1 below is implemented and deployed on testnet as contract `CA4ZE5DVT7MBG3P6TOSK3SJJNJAKFMGW2A5XSQCSOEM5XBIT5ZTTL3AD` (results in Appendix A). Tranche #1 delivers v1.1, which keeps this interface and changes only the `transfer_executed` event to a compact format, because the per-transaction contract events size caps v1 at 25 USDC payments per transaction.
 
 ```rust
 pub struct Payment { pub to: Address, pub amount: i128, pub reference: BytesN<32> }
@@ -288,9 +291,9 @@ Contract: unit and integration tests covering limits, replay, pause, reverts and
 
 | # | Deliverable | Section | Weeks |
 |---|---|---|---|
-| 1.1 | Multisend on testnet | 4 | 1-3 |
-| 1.2 | Batch signed from C-Payroll | 5.3, 6.1 | 2-4 |
-| 1.3 | JAM wallet with 0 XLM receives USDC | 6.2 | 1-4 |
+| 1.1 | Multisend v1.1: higher batch limit, fuzz tests, Audit Bank readiness | 4 | 1-3 |
+| 1.2 | Runs signed from C-Payroll, including runs split into several batches | 5.3, 6.1 | 1-4 |
+| 1.3 | JAM sponsor service; wallet with 0 XLM receives USDC | 6.2, 7 | 1-4 |
 | 1.4 | C-Payroll to JAM integration: one run pays 20 JAM wallets | 6.1, 6.2 | 4 |
 | 2.1 | Three payout flows, reconciliation | 6.1, 8 | 5-8 |
 | 2.2 | Bridge in sandbox | 6.3 | 5-6 |
@@ -320,12 +323,30 @@ Contract: unit and integration tests covering limits, replay, pause, reverts and
 
 | Item | When | Licence |
 |---|---|---|
-| Multisend contract, tests, documentation, integration guide | Public from T1, tagged release in 3.5 | Apache-2.0 |
+| Multisend contract, tests, documentation, integration guide | Public today, tagged release in 3.5 | Apache-2.0 |
 | JAM Swift Stellar wallet module (account sync, trustlines, sponsored reserves) | Tagged release in 3.5 | Apache-2.0, keeping the MIT notice for code derived from Unstoppable Wallet |
 
 Remain closed: both platforms' cores; JAM's Kotlin layer, since `org.stellar:wallet-sdk` already fills that role on Android; product wiring; the monitoring worker and populated thresholds.
 
-## Appendix A. Spike results
+## Appendix A. Testnet results
+
+### A.1 Multisend v1
+
+Network: Stellar testnet, protocol 30. Tools: Rust 1.93.1, soroban-sdk 29.0.1, stellar-cli 28.1.0.
+
+| Item | Value |
+|---|---|
+| Contract | `CA4ZE5DVT7MBG3P6TOSK3SJJNJAKFMGW2A5XSQCSOEM5XBIT5ZTTL3AD` |
+| Wasm hash | `e8135240f372a500f60cc47fa764c94de2587af656773dfce18188979e8b0c62` |
+| Admin | `GD7CQVI3M6CZEXJPXGVWGMZJ6EP2R5IZ5DNFCXAAD7RQBY2EHTMNAQHB`, 2-of-3 multisig, master weight 0 |
+| 4-payment batch | `0b13fc2286c428943e7578c5f2614ff0aef6aedb5ae42be88c878e953fb511d9` |
+| 25-payment batch | `3b079f3be658b5aca98bdb0993ed230dd173719039999e1d62df9351b28b093f` (succeeds) |
+| 26-payment batch | `358d04148ae2d56c43e5c4db1a1474859babee167c067dd6c1f97329e0f7f902` (fails: contract events 16,408 bytes, limit 16,384) |
+| Rejected as designed | Repeated `batch_id`; recipient without a USDC trustline (nobody paid); `multisend` while paused; admin call with one signer or with the master key |
+
+The full step-by-step log, with every transaction, is in the repository README.
+
+### A.2 Spike
 
 Network: Stellar testnet. Tools: Rust 1.93.1, soroban-sdk 29.0.1, stellar-cli 28.1.0.
 
