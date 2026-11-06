@@ -1,6 +1,6 @@
 [package]
-name = "batch-payment"
-version = "0.1.0"
+name = "multisend"
+version = "1.0.0"
 edition = "2021"
 publish = false
 
