@@ -123,6 +123,7 @@ Contract [`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA`](https://st
 | Deploy with admin and limit 10 | ✅ | [`7d11ceb7…`](https://stellar.expert/explorer/testnet/tx/7d11ceb7e10591b062581af969b50225c1c2225f73d67527abc59fc0d9616f21) |
 | `multisend`: 4 recipients, 9.25 USDC | ✅ 4 `transfer_executed`, `batch_executed` count 4, total 92500000 | [`0b13fc22…`](https://stellar.expert/explorer/testnet/tx/0b13fc2286c428943e7578c5f2614ff0aef6aedb5ae42be88c878e953fb511d9) |
 | Same `batch_id` again | ❌ `Error(Contract, #4)` `DuplicateBatchId` in simulation | — |
+| `multisend` to a recipient without a USDC trustline (plus one with) | ❌ `Error(Contract, #13)` `TrustlineMissingError` from the token in simulation; nobody paid | — |
 | `pause` signed by signer 1 only | ❌ `tx_bad_auth`, not included | — |
 | `pause` signed by signers 1 and 2 | ✅ | [`be941154…`](https://stellar.expert/explorer/testnet/tx/be9411547d882931f388fc9f402713bbe3fa57b29d75503c9da93528405ef80e) |
 | `multisend` while paused | ❌ `Error(Contract, #5)` `Paused` in simulation | — |

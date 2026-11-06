@@ -92,7 +92,7 @@ pub fn max_batch_size(env: Env) -> u32         // read-only
 
 | Error | Meaning |
 |---|---|
-| `InvalidBatchSize` | Empty batch or above the limit |
+| `InvalidBatchSize` | Empty batch, above the limit, or a zero limit |
 | `InvalidAmount` | Amount not above zero |
 | `Overflow` | Checked sum overflowed |
 | `DuplicateBatchId` | Batch already executed |
