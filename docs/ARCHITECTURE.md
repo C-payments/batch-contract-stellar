@@ -65,7 +65,7 @@ pub fn batch_transfer(env: Env, token: Address, from: Address, payments: Vec<Pay
 
 ### 4.2 Multisend v1 (Testnet today; v1.1 in T1)
 
-Multisend v1 below is implemented and deployed on testnet as contract `CA4ZE5DVT7MBG3P6TOSK3SJJNJAKFMGW2A5XSQCSOEM5XBIT5ZTTL3AD` (results in Appendix A). Tranche #1 delivers v1.1, which keeps this interface and changes only the `transfer_executed` event to a compact format, because the per-transaction contract events size caps v1 at 25 USDC payments per transaction.
+Multisend v1 below is implemented and deployed on testnet as contract `CBRH3WONSDMADSEAO7GJHGZEKU5SZIKCJPFBPBIDLKRAKVVNJ2WQVFXK` (results in Appendix A). Tranche #1 delivers v1.1, which keeps this interface and changes only the `transfer_executed` event to a compact format, because the per-transaction contract events size caps v1 at 25 USDC payments per transaction.
 
 ```rust
 pub struct Payment { pub to: Address, pub amount: i128, pub reference: BytesN<32> }
@@ -285,7 +285,7 @@ Monitors consider only events whose `from` is a company wallet linked in C-Payro
 
 ## 13. Testing strategy
 
-Contract: unit and integration tests covering limits, replay, pause, reverts and authorization, with at least 90% line coverage reported in CI. Testnet end-to-end runs for each flow in section 6. Manual QA on iOS and Android before each release.
+Contract: unit and integration tests covering limits, replay, pause, reverts and authorization, with at least 90% line coverage reported in CI. The 2-of-3 admin threshold is enforced by the network, not the contract, so `scripts/test-multisig.sh` checks it on testnet with throwaway keys. Testnet end-to-end runs for each flow in section 6. Manual QA on iOS and Android before each release.
 
 ## 14. Delivery plan
 
@@ -336,13 +336,14 @@ Network: Stellar testnet, protocol 30. Tools: Rust 1.93.1, soroban-sdk 29.0.1, s
 
 | Item | Value |
 |---|---|
-| Contract | `CA4ZE5DVT7MBG3P6TOSK3SJJNJAKFMGW2A5XSQCSOEM5XBIT5ZTTL3AD` |
-| Wasm hash | `e8135240f372a500f60cc47fa764c94de2587af656773dfce18188979e8b0c62` |
+| Contract | `CBRH3WONSDMADSEAO7GJHGZEKU5SZIKCJPFBPBIDLKRAKVVNJ2WQVFXK` |
+| Wasm hash | `67b273e2816d27552a713f55300a02721088a7a7c394c7e62a5aed35a7e5bc21` (CI build; a macOS build of the same source differs) |
 | Admin | `GD7CQVI3M6CZEXJPXGVWGMZJ6EP2R5IZ5DNFCXAAD7RQBY2EHTMNAQHB`, 2-of-3 multisig, master weight 0 |
-| 4-payment batch | `0b13fc2286c428943e7578c5f2614ff0aef6aedb5ae42be88c878e953fb511d9` |
-| 25-payment batch | `3b079f3be658b5aca98bdb0993ed230dd173719039999e1d62df9351b28b093f` (succeeds) |
-| 26-payment batch | `358d04148ae2d56c43e5c4db1a1474859babee167c067dd6c1f97329e0f7f902` (fails: contract events 16,408 bytes, limit 16,384) |
+| 4-payment batch | `2abf5a39fc5935e8cd4ca151ac782afd7bd38b34b10d260a8a162391afed1413` |
+| 25-payment batch | `de93c57ac53ad9b9218dc45aca3e8334661e2fdfd8eb86732486909d11ee5690` (succeeds) |
+| 26-payment batch | `afcb39fc1f44df9d333a1b1dbf222df6bfbaca40baab7c7866b154d0c78924c7` (fails: contract events 16,408 bytes, limit 16,384) |
 | Rejected as designed | Repeated `batch_id`; recipient without a USDC trustline (nobody paid); `multisend` while paused; admin call with one signer or with the master key |
+| 2-of-3 admin check | `scripts/test-multisig.sh`, 2026-11-11: one signer, the same signer twice, a signer with an outsider, the outsider and the master key rejected with `tx_bad_auth` and the state unchanged; each pair of signers accepted |
 
 The full step-by-step log, with every transaction, is in the repository README.
 

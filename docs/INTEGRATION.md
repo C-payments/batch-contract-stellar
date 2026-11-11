@@ -8,7 +8,7 @@ section 4.2; build and deployment are in the [README](../README.md).
 
 | Network | Multisend | USDC Stellar Asset Contract |
 |---|---|---|
-| Testnet | `CA4ZE5DVT7MBG3P6TOSK3SJJNJAKFMGW2A5XSQCSOEM5XBIT5ZTTL3AD` | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
+| Testnet | `CBRH3WONSDMADSEAO7GJHGZEKU5SZIKCJPFBPBIDLKRAKVVNJ2WQVFXK` | `CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` |
 | Mainnet | not deployed | — |
 
 Only pass the USDC or XLM Stellar Asset Contract as `token`. The contract

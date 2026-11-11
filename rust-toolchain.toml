@@ -1,4 +1,5 @@
-# Pinned for reproducible builds: the published wasm hash depends on it.
+# Pinned: the wasm hash depends on it. It also depends on the build host, so
+# the published wasm and its hash come from CI (ubuntu-24.04).
 [toolchain]
 channel = "1.93.1"
 targets = ["wasm32v1-none"]
